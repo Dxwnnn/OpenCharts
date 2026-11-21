@@ -1,0 +1,809 @@
+// ============================================================================
+// Input Charts: Mid Gray, Gray Ramp, Exposure Ramp, Gradient Chart, Color Chart,
+//               Skin Chart, LUT Cube, Test Patches
+// Output Monitoring: False Color, Saturation False Color, Negatives Indicator,
+//                    Highlight Neutrals, Skin Hue Indicator
+// Color Management: Primaries (Rec.709, DaVinci Wide Gamut, P3-D65, Rec.2020; alle D65)
+//                   und Transferfunktion (Linear, DaVinci Intermediate, Rec.709 OETF, sRGB)
+//
+// ============================================================================
+
+// ---------------------------------------------------------------- 1. UI
+DEFINE_UI_PARAMS(chart_sel, Input Chart, DCTLUI_COMBO_BOX, 0, {ch_off, ch_midgray, ch_grayramp, ch_exposure, ch_gradient, ch_colorchart, ch_skin, ch_lutcube, ch_patches}, {Off, Mid Gray, Gray Ramp, Exposure Ramp, Gradient Chart, Color Chart, Skin Chart, LUT Cube, Test Patches})
+DEFINE_UI_PARAMS(layout_sel, Layout, DCTLUI_COMBO_BOX, 0, {lay_side, lay_full}, {Side Panel, Full Frame})
+DEFINE_UI_PARAMS(panel_w, Panel Width, DCTLUI_SLIDER_FLOAT, 0.38, 0.15, 0.9, 0.01)
+DEFINE_UI_PARAMS(exp_stops, Exposure Stops Each Side, DCTLUI_SLIDER_FLOAT, 6.0, 2.0, 9.0, 1.0)
+DEFINE_UI_PARAMS(chart_ev, Chart Exposure Stops, DCTLUI_SLIDER_FLOAT, 0.0, -4.0, 4.0, 0.1)
+DEFINE_UI_PARAMS(hide_legends, Hide Legends, DCTLUI_CHECK_BOX, 0)
+DEFINE_UI_PARAMS(legend_size, Legend Size, DCTLUI_SLIDER_FLOAT, 1.0, 0.5, 3.0, 0.1)
+DEFINE_UI_PARAMS(flip_v, Flip Vertical, DCTLUI_CHECK_BOX, 0)
+DEFINE_UI_PARAMS(mon_false, False Color, DCTLUI_CHECK_BOX, 0)
+DEFINE_UI_PARAMS(mon_sat, Saturation False Color, DCTLUI_CHECK_BOX, 0)
+DEFINE_UI_PARAMS(mon_neg, Negatives Indicator, DCTLUI_CHECK_BOX, 0)
+DEFINE_UI_PARAMS(gamut_target, Negatives Target Gamut, DCTLUI_COMBO_BOX, 0, {gt_rec709, gt_dwg, gt_p3d65, gt_rec2020}, {Rec.709, DaVinci Wide Gamut, P3 D65, Rec.2020})
+DEFINE_UI_PARAMS(mon_neutral, Highlight Neutrals, DCTLUI_CHECK_BOX, 0)
+DEFINE_UI_PARAMS(neutral_tol, Neutral Chroma Tolerance, DCTLUI_SLIDER_FLOAT, 4.0, 1.0, 15.0, 0.5)
+DEFINE_UI_PARAMS(mon_skin, Skin Hue Indicator, DCTLUI_CHECK_BOX, 0)
+DEFINE_UI_PARAMS(skin_tol, Skin Hue Tolerance Degrees, DCTLUI_SLIDER_FLOAT, 20.0, 5.0, 40.0, 1.0)
+DEFINE_UI_PARAMS(mon_dim, Indicator Background Dim, DCTLUI_SLIDER_FLOAT, 0.5, 0.0, 0.9, 0.05)
+DEFINE_UI_PARAMS(cs_prim, Color Space Primaries, DCTLUI_COMBO_BOX, 1, {prim_rec709, prim_dwg, prim_p3d65, prim_rec2020}, {Rec.709, DaVinci Wide Gamut, P3 D65, Rec.2020})
+DEFINE_UI_PARAMS(cs_tf, Transfer Function, DCTLUI_COMBO_BOX, 1, {tf_linear, tf_di, tf_rec709, tf_srgb}, {Linear, DaVinci Intermediate, Rec.709, sRGB})
+DEFINE_UI_PARAMS(bypass, Bypass, DCTLUI_CHECK_BOX, 0)
+
+// ------------------------------------------- 2. Transferfunktionen
+// DaVinci Intermediate (Blackmagic Design, DaVinci Resolve Wide Gamut Intermediate)
+#define DI_A       0.0075f
+#define DI_B       7.0f
+#define DI_C       0.07329248f
+#define DI_M       10.44426855f
+#define DI_LIN_CUT 0.00262409f
+#define DI_LOG_CUT 0.02740668f
+
+// Rec.709 OETF (ITU-R BT.709, szenenreferenziert)
+#define R709_LIN_CUT 0.018053968510807f
+#define R709_LOG_CUT 0.081242858298635f
+#define R709_A       1.09929682680944f
+#define R709_B       0.09929682680944f
+
+__DEVICE__ float di_encode(float x)
+{
+    return (x > DI_LIN_CUT) ? (_log2f(x + DI_A) + DI_B) * DI_C : x * DI_M;
+}
+__DEVICE__ float di_decode(float y)
+{
+    return (y > DI_LOG_CUT) ? _exp2f(y / DI_C - DI_B) - DI_A : y / DI_M;
+}
+
+__DEVICE__ float r709_encode(float x)
+{
+    return (x < R709_LIN_CUT) ? 4.5f * x : R709_A * _powf(x, 0.45f) - R709_B;
+}
+__DEVICE__ float r709_decode(float y)
+{
+    return (y < R709_LOG_CUT) ? y / 4.5f : _powf((y + R709_B) / R709_A, 1.0f / 0.45f);
+}
+
+__DEVICE__ float srgb_encode(float x)
+{
+    return (x <= 0.0031308f) ? 12.92f * x : 1.055f * _powf(x, 1.0f / 2.4f) - 0.055f;
+}
+__DEVICE__ float srgb_decode(float y)
+{
+    return (y <= 0.04045f) ? y / 12.92f : _powf((y + 0.055f) / 1.055f, 2.4f);
+}
+
+__DEVICE__ float tf_encode_ch(float x, int tf)
+{
+    if (tf == tf_di)     return di_encode(x);
+    if (tf == tf_rec709) return r709_encode(x);
+    if (tf == tf_srgb)   return srgb_encode(x);
+    return x; // Linear
+}
+__DEVICE__ float tf_decode_ch(float y, int tf)
+{
+    if (tf == tf_di)     return di_decode(y);
+    if (tf == tf_rec709) return r709_decode(y);
+    if (tf == tf_srgb)   return srgb_decode(y);
+    return y; // Linear
+}
+
+__DEVICE__ float3 tf_encode(float3 c, int tf)
+{
+    return make_float3(tf_encode_ch(c.x, tf), tf_encode_ch(c.y, tf), tf_encode_ch(c.z, tf));
+}
+__DEVICE__ float3 tf_decode(float3 c, int tf)
+{
+    return make_float3(tf_decode_ch(c.x, tf), tf_decode_ch(c.y, tf), tf_decode_ch(c.z, tf));
+}
+
+// ------------------------------------------- 3. Primaries (RGB <-> XYZ, D65)
+__DEVICE__ float3 rgb_to_xyz(float3 c, int prim)
+{
+    if (prim == prim_rec709)
+        return make_float3(
+            0.41239080f * c.x + 0.35758434f * c.y + 0.18048079f * c.z,
+            0.21263901f * c.x + 0.71516868f * c.y + 0.07219232f * c.z,
+            0.01933082f * c.x + 0.11919478f * c.y + 0.95053215f * c.z);
+    if (prim == prim_dwg)
+        return make_float3(
+            0.70062239f * c.x + 0.14877482f * c.y + 0.10105872f * c.z,
+            0.27411851f * c.x + 0.87363190f * c.y + -0.14775041f * c.z,
+            -0.09896291f * c.x + -0.13789533f * c.y + 1.32591599f * c.z);
+    if (prim == prim_p3d65)
+        return make_float3(
+            0.48657095f * c.x + 0.26566769f * c.y + 0.19821729f * c.z,
+            0.22897456f * c.x + 0.69173852f * c.y + 0.07928691f * c.z,
+            -0.00000000f * c.x + 0.04511338f * c.y + 1.04394437f * c.z);
+    if (prim == prim_rec2020)
+        return make_float3(
+            0.63695805f * c.x + 0.14461690f * c.y + 0.16888098f * c.z,
+            0.26270021f * c.x + 0.67799807f * c.y + 0.05930172f * c.z,
+            0.00000000f * c.x + 0.02807269f * c.y + 1.06098506f * c.z);
+    return c;
+}
+
+__DEVICE__ float3 xyz_to_rgb(float3 c, int prim)
+{
+    if (prim == prim_rec709)
+        return make_float3(
+            3.24096994f * c.x + -1.53738318f * c.y + -0.49861076f * c.z,
+            -0.96924364f * c.x + 1.87596750f * c.y + 0.04155506f * c.z,
+            0.05563008f * c.x + -0.20397696f * c.y + 1.05697151f * c.z);
+    if (prim == prim_dwg)
+        return make_float3(
+            1.51667204f * c.x + -0.28147805f * c.y + -0.14696363f * c.z,
+            -0.46491710f * c.x + 1.25142378f * c.y + 0.17488461f * c.z,
+            0.06484905f * c.x + 0.10913934f * c.y + 0.76141462f * c.z);
+    if (prim == prim_p3d65)
+        return make_float3(
+            2.49349691f * c.x + -0.93138362f * c.y + -0.40271078f * c.z,
+            -0.82948897f * c.x + 1.76266406f * c.y + 0.02362469f * c.z,
+            0.03584583f * c.x + -0.07617239f * c.y + 0.95688452f * c.z);
+    if (prim == prim_rec2020)
+        return make_float3(
+            1.71665119f * c.x + -0.35567078f * c.y + -0.25336628f * c.z,
+            -0.66668435f * c.x + 1.61648124f * c.y + 0.01576855f * c.z,
+            0.01763986f * c.x + -0.04277061f * c.y + 0.94210312f * c.z);
+    return c;
+}
+
+// Luminanz Y (linear) fuer die gewaehlten Primaries
+__DEVICE__ float luminance_Y(float3 lin, int prim)
+{
+    return rgb_to_xyz(lin, prim).y;
+}
+
+// Test Patches (5 senkrechte Streifen, Werte in gewaehlten Primaries + Transferfunktion):
+// 1: 18% Grau (linear 0.18)  2: Rec.709 Rot  3: Rec.709 Gruen  4: Rec.709 Blau (je 0.18 linear)
+// 5: Weiss (linear 1.0)
+__DEVICE__ float3 test_patches(float u, int prim, int tf)
+{
+    float3 lin;
+    if (u < 0.2f)
+        lin = make_float3(0.18f, 0.18f, 0.18f);
+    else if (u < 0.4f)
+        lin = xyz_to_rgb(rgb_to_xyz(make_float3(0.18f, 0.0f, 0.0f), prim_rec709), prim);
+    else if (u < 0.6f)
+        lin = xyz_to_rgb(rgb_to_xyz(make_float3(0.0f, 0.18f, 0.0f), prim_rec709), prim);
+    else if (u < 0.8f)
+        lin = xyz_to_rgb(rgb_to_xyz(make_float3(0.0f, 0.0f, 0.18f), prim_rec709), prim);
+    else
+        lin = make_float3(1.0f, 1.0f, 1.0f);
+    return tf_encode(lin, tf);
+}
+
+// ------------------------------------------- 4. Chart-Generatoren
+// Koordinaten: u = 0..1 (links->rechts), v = 0..1 (oben->unten, mit Flip Vertical umkehrbar)
+
+__DEVICE__ float3 grey3(float x)
+{
+    return make_float3(x, x, x);
+}
+
+// Mid Gray: 18 % linear, mit der gewaehlten Transferfunktion kodiert
+__DEVICE__ float3 chart_midgray(int tf)
+{
+    return tf_encode(grey3(0.18f), tf);
+}
+
+// Gray Ramp (Codewerte 0..1): obere Haelfte stufenlos, untere Haelfte 11 Stufen (0.0, 0.1 ... 1.0)
+__DEVICE__ float3 chart_grayramp(float u, float v)
+{
+    if (v < 0.5f)
+        return grey3(u);
+    int i = (int)(u * 11.0f);
+    if (i > 10) i = 10;
+    return grey3((float)i / 10.0f);
+}
+
+// Exposure Ramp: Stops relativ zu 18 % Grau (0 Stops = Mitte).
+// Obere Haelfte: ein Feld pro Stop. Untere Haelfte: stufenloser Verlauf ueber denselben Bereich.
+__DEVICE__ float3 chart_exposure(float u, float v, int tf, int n)
+{
+    int count = 2 * n + 1;
+    float stop;
+    if (v < 0.5f)
+    {
+        int i = (int)(u * (float)count);
+        if (i > count - 1) i = count - 1;
+        stop = (float)(i - n);
+    }
+    else
+    {
+        stop = -(float)n - 0.5f + u * (float)count;
+    }
+    float lin = 0.18f * _exp2f(stop);
+    return tf_encode(grey3(lin), tf);
+}
+
+// Gradient Chart: 7 waagrechte Baender mit Codewert-Verlaeufen 0..1
+// (Grau, R, G, B, Cyan, Magenta, Gelb) im Arbeitsfarbraum - zeigt Banding und Clipping.
+__DEVICE__ float3 chart_gradient(float u, float v)
+{
+    int band = (int)(v * 7.0f);
+    if (band > 6) band = 6;
+    if (band == 0) return make_float3(u, u, u);
+    if (band == 1) return make_float3(u, 0.0f, 0.0f);
+    if (band == 2) return make_float3(0.0f, u, 0.0f);
+    if (band == 3) return make_float3(0.0f, 0.0f, u);
+    if (band == 4) return make_float3(0.0f, u, u);
+    if (band == 5) return make_float3(u, 0.0f, u);
+    return make_float3(u, u, 0.0f);
+}
+
+// ColorChecker Classic (24 Felder), sRGB-Darstellung (D65) als 8-Bit-Codewerte.
+__DEVICE__ float3 cc_srgb(int idx)
+{
+    if (idx == 0) return make_float3(115.0f / 255.0f, 82.0f / 255.0f, 68.0f / 255.0f);
+    if (idx == 1) return make_float3(194.0f / 255.0f, 150.0f / 255.0f, 130.0f / 255.0f);
+    if (idx == 2) return make_float3(98.0f / 255.0f, 122.0f / 255.0f, 157.0f / 255.0f);
+    if (idx == 3) return make_float3(87.0f / 255.0f, 108.0f / 255.0f, 67.0f / 255.0f);
+    if (idx == 4) return make_float3(133.0f / 255.0f, 128.0f / 255.0f, 177.0f / 255.0f);
+    if (idx == 5) return make_float3(103.0f / 255.0f, 189.0f / 255.0f, 170.0f / 255.0f);
+    if (idx == 6) return make_float3(214.0f / 255.0f, 126.0f / 255.0f, 44.0f / 255.0f);
+    if (idx == 7) return make_float3(80.0f / 255.0f, 91.0f / 255.0f, 166.0f / 255.0f);
+    if (idx == 8) return make_float3(193.0f / 255.0f, 90.0f / 255.0f, 99.0f / 255.0f);
+    if (idx == 9) return make_float3(94.0f / 255.0f, 60.0f / 255.0f, 108.0f / 255.0f);
+    if (idx == 10) return make_float3(157.0f / 255.0f, 188.0f / 255.0f, 64.0f / 255.0f);
+    if (idx == 11) return make_float3(224.0f / 255.0f, 163.0f / 255.0f, 46.0f / 255.0f);
+    if (idx == 12) return make_float3(56.0f / 255.0f, 61.0f / 255.0f, 150.0f / 255.0f);
+    if (idx == 13) return make_float3(70.0f / 255.0f, 148.0f / 255.0f, 73.0f / 255.0f);
+    if (idx == 14) return make_float3(175.0f / 255.0f, 54.0f / 255.0f, 60.0f / 255.0f);
+    if (idx == 15) return make_float3(231.0f / 255.0f, 199.0f / 255.0f, 31.0f / 255.0f);
+    if (idx == 16) return make_float3(187.0f / 255.0f, 86.0f / 255.0f, 149.0f / 255.0f);
+    if (idx == 17) return make_float3(8.0f / 255.0f, 133.0f / 255.0f, 161.0f / 255.0f);
+    if (idx == 18) return make_float3(243.0f / 255.0f, 243.0f / 255.0f, 242.0f / 255.0f);
+    if (idx == 19) return make_float3(200.0f / 255.0f, 200.0f / 255.0f, 200.0f / 255.0f);
+    if (idx == 20) return make_float3(160.0f / 255.0f, 160.0f / 255.0f, 160.0f / 255.0f);
+    if (idx == 21) return make_float3(122.0f / 255.0f, 122.0f / 255.0f, 121.0f / 255.0f);
+    if (idx == 22) return make_float3(85.0f / 255.0f, 85.0f / 255.0f, 85.0f / 255.0f);
+    if (idx == 23) return make_float3(52.0f / 255.0f, 52.0f / 255.0f, 52.0f / 255.0f);
+    return make_float3(0.0f, 0.0f, 0.0f);
+}
+
+// Hintergrund zwischen den Feldern: sehr dunkles Grau (linear 0.005)
+__DEVICE__ float3 chart_bg(int tf)
+{
+    return tf_encode(grey3(0.005f), tf);
+}
+
+// Linear-Rec.709 -> Arbeits-Primaries, mit Belichtungsfaktor (Stops), dann kodiert
+__DEVICE__ float3 lin709_to_working(float3 lin709, int prim, int tf, float ev)
+{
+    float3 w = xyz_to_rgb(rgb_to_xyz(lin709, prim_rec709), prim);
+    float k = _exp2f(ev);
+    return tf_encode(make_float3(w.x * k, w.y * k, w.z * k), tf);
+}
+
+// Color Chart: 6 x 4 Felder (ColorChecker-Anordnung), Gap 6 % je Feld
+__DEVICE__ float3 chart_color(float u, float v, int prim, int tf, float ev)
+{
+    int col = (int)(u * 6.0f); if (col > 5) col = 5;
+    int row = (int)(v * 4.0f); if (row > 3) row = 3;
+    float lu = u * 6.0f - (float)col;
+    float lv = v * 4.0f - (float)row;
+    if (lu < 0.06f || lu > 0.94f || lv < 0.06f || lv > 0.94f)
+        return chart_bg(tf);
+    float3 c = cc_srgb(row * 6 + col);
+    float3 lin709 = make_float3(srgb_decode(c.x), srgb_decode(c.y), srgb_decode(c.z));
+    return lin709_to_working(lin709, prim, tf, ev);
+}
+
+// ---- Skin Chart: konstruierte Hautton-Reihe in CIELAB (D65), Hue-Winkel 55 Grad.
+// Achtung: KEINE gemessene Referenz, sondern eine Naeherung entlang der Hautton-Linie.
+#define SKIN_COS 0.573576436f   // cos(55 Grad)
+#define SKIN_SIN 0.819152044f   // sin(55 Grad)
+
+__DEVICE__ float skin_chroma(int i)
+{
+    if (i == 0) return 20.0f;
+    if (i == 1) return 24.0f;
+    if (i == 2) return 28.0f;
+    if (i == 3) return 28.0f;
+    if (i == 4) return 26.0f;
+    if (i == 5) return 24.0f;
+    if (i == 6) return 20.0f;
+    return 16.0f;
+}
+
+__DEVICE__ float lab_finv(float t)
+{
+    return (t > 0.20689655f) ? t * t * t : 0.12841855f * (t - 0.13793103f);
+}
+
+// CIELAB (D65-Weisspunkt) -> XYZ
+__DEVICE__ float3 lab_to_xyz(float L, float a, float b)
+{
+    float fy = (L + 16.0f) / 116.0f;
+    float fx = fy + a / 500.0f;
+    float fz = fy - b / 200.0f;
+    return make_float3(0.95047f * lab_finv(fx), lab_finv(fy), 1.08883f * lab_finv(fz));
+}
+
+// Skin Chart: 8 Spalten (L* 80 -> 24), 3 Zeilen (Chroma x1.0, x0.6, x1.4)
+__DEVICE__ float3 chart_skin(float u, float v, int prim, int tf, float ev)
+{
+    int col = (int)(u * 8.0f); if (col > 7) col = 7;
+    int row = (int)(v * 3.0f); if (row > 2) row = 2;
+    float lu = u * 8.0f - (float)col;
+    float lv = v * 3.0f - (float)row;
+    if (lu < 0.05f || lu > 0.95f || lv < 0.05f || lv > 0.95f)
+        return chart_bg(tf);
+    float L = 80.0f - 8.0f * (float)col;
+    float cscale = (row == 0) ? 1.0f : ((row == 1) ? 0.6f : 1.4f);
+    float C = skin_chroma(col) * cscale;
+    float3 xyz = lab_to_xyz(L, C * SKIN_COS, C * SKIN_SIN);
+    float3 w = xyz_to_rgb(xyz, prim);
+    float k = _exp2f(ev);
+    return tf_encode(make_float3(w.x * k, w.y * k, w.z * k), tf);
+}
+
+// ---- LUT Cube: 9x9x9-Gitter als 3x3 Slices (Slice = Blau-Stufe 0..8),
+// je Slice 9x9 Felder: Rot nach rechts, Gruen nach oben. Werte sind Codewerte im Arbeitsfarbraum.
+__DEVICE__ float3 chart_lutcube(float u, float v, int tf)
+{
+    int sc = (int)(u * 3.0f); if (sc > 2) sc = 2;
+    int sr = (int)(v * 3.0f); if (sr > 2) sr = 2;
+    float su = u * 3.0f - (float)sc;
+    float sv = v * 3.0f - (float)sr;
+    if (su < 0.03f || su > 0.97f || sv < 0.03f || sv > 0.97f)
+        return chart_bg(tf);
+    float lu = (su - 0.03f) / 0.94f;
+    float lv = (sv - 0.03f) / 0.94f;
+    int ri = (int)(lu * 9.0f); if (ri > 8) ri = 8;
+    int gi = (int)(lv * 9.0f); if (gi > 8) gi = 8;
+    float r = (float)ri / 8.0f;
+    float g = 1.0f - (float)gi / 8.0f;
+    float b = (float)(sr * 3 + sc) / 8.0f;
+    return make_float3(r, g, b);
+}
+
+// ------------------------------------------- 4b. Output Monitoring
+// Alle Analysen arbeiten auf der Luminanz Y bzw. CIELAB (D65), berechnet aus den
+// gewaehlten Primaries und der gewaehlten Transferfunktion (decodiert nach linear).
+
+__DEVICE__ float lab_f(float t)
+{
+    return (t > 0.008856452f) ? _powf(t, 0.33333334f) : 7.787037f * t + 0.13793103f;
+}
+
+// XYZ (D65) -> CIELAB; Rueckgabe: x = L*, y = a*, z = b*
+__DEVICE__ float3 xyz_to_lab(float3 c)
+{
+    float fx = lab_f(c.x / 0.95047f);
+    float fy = lab_f(c.y);
+    float fz = lab_f(c.z / 1.08883f);
+    return make_float3(116.0f * fy - 16.0f, 500.0f * (fx - fy), 200.0f * (fy - fz));
+}
+
+// tan() per Reihenentwicklung (Grad -> Verhaeltnis), genau genug fuer 5..40 Grad
+__DEVICE__ float tan_deg(float deg)
+{
+    float r = deg * 0.017453293f;
+    float r2 = r * r;
+    return r * (1.0f + r2 * (0.33333333f + r2 * (0.13333333f + r2 * 0.053968254f)));
+}
+
+// False Color nach Blenden relativ zu 18 % Grau (Y = 0.18 -> 0 Stops):
+//  < -6 Violett | -6..-4 Blau | -4..-2 Cyan | -2..-0.5 Grau (Original-Luma)
+//  -0.5..+0.5 Gruen (Mittelgrau) | +0.5..+1.5 Pink | +1.5..+3 Gelb | +3..+4 Orange | > +4 Rot
+__DEVICE__ float3 false_color(float Y, int tf)
+{
+    float stop = _log2f(_fmaxf(Y, 0.000001f) / 0.18f);
+    if (stop < -6.0f) return make_float3(0.40f, 0.00f, 0.60f);
+    if (stop < -4.0f) return make_float3(0.10f, 0.10f, 1.00f);
+    if (stop < -2.0f) return make_float3(0.00f, 0.70f, 0.90f);
+    if (stop < -0.5f)
+    {
+        float g = tf_encode_ch(Y, tf);
+        return make_float3(g, g, g);
+    }
+    if (stop < 0.5f) return make_float3(0.00f, 0.80f, 0.10f);
+    if (stop < 1.5f) return make_float3(1.00f, 0.50f, 0.70f);
+    if (stop < 3.0f) return make_float3(1.00f, 0.90f, 0.00f);
+    if (stop < 4.0f) return make_float3(1.00f, 0.50f, 0.00f);
+    return make_float3(1.00f, 0.00f, 0.00f);
+}
+
+// Saturation False Color nach CIELAB-Chroma C* (Vergleich mit Quadraten, ohne Wurzel):
+//  < 3 Grau (Original-Luma) | 3..10 Blau | 10..25 Gruen | 25..45 Gelb | 45..70 Orange | 70..100 Rot | > 100 Magenta
+__DEVICE__ float3 sat_false_color(float c2, float Y, int tf)
+{
+    if (c2 < 9.0f)
+    {
+        float g = tf_encode_ch(Y, tf);
+        return make_float3(g, g, g);
+    }
+    if (c2 < 100.0f)   return make_float3(0.10f, 0.20f, 1.00f);
+    if (c2 < 625.0f)   return make_float3(0.00f, 0.80f, 0.20f);
+    if (c2 < 2025.0f)  return make_float3(1.00f, 0.90f, 0.00f);
+    if (c2 < 4900.0f)  return make_float3(1.00f, 0.50f, 0.00f);
+    if (c2 < 10000.0f) return make_float3(1.00f, 0.00f, 0.00f);
+    return make_float3(1.00f, 0.00f, 1.00f);
+}
+
+// Mischt Basisbild (40 %) mit einer Markierungsfarbe (60 %)
+__DEVICE__ float3 mark_color(float3 base, float3 mark)
+{
+    return make_float3(base.x * 0.4f + mark.x * 0.6f,
+                       base.y * 0.4f + mark.y * 0.6f,
+                       base.z * 0.4f + mark.z * 0.6f);
+}
+
+// Gesamtes Monitoring. f_* = Schalter. Reihenfolge der Markierungen (oben liegt zuletzt):
+// Highlight Neutrals -> Skin Hue -> Negatives.
+// gamut ist ein Index 0..3 in derselben Reihenfolge wie prim_* (Rec.709, DWG, P3-D65, Rec.2020).
+__DEVICE__ float3 apply_monitoring(float3 rgb, int prim, int tf, int gamut,
+                                   int f_false, int f_sat, int f_neg, int f_neu, int f_skin,
+                                   float ntol, float stol, float dim)
+{
+    if (!f_false && !f_sat && !f_neg && !f_neu && !f_skin)
+        return rgb;
+
+    float3 lin = tf_decode(rgb, tf);
+    float3 xyz = rgb_to_xyz(lin, prim);
+    float Y = xyz.y;
+    float3 lab = xyz_to_lab(xyz);
+    float c2 = lab.y * lab.y + lab.z * lab.z;
+
+    // Basisbild: Original oder False-Color-Variante
+    float3 base = rgb;
+    if (f_false)
+        base = false_color(Y, tf);
+    else if (f_sat)
+        base = sat_false_color(c2, Y, tf);
+
+    if (!f_neg && !f_neu && !f_skin)
+        return base;
+
+    // Hintergrund abdunkeln, damit Markierungen auffallen
+    float k = 1.0f - dim;
+    float3 res = make_float3(base.x * k, base.y * k, base.z * k);
+
+    // Highlight Neutrals: C* unter Toleranz (Schatten unter ca. -5 Stops ausgenommen)
+    if (f_neu)
+    {
+        if (Y > 0.005f && c2 < ntol * ntol)
+            res = mark_color(base, make_float3(0.0f, 0.85f, 0.25f));
+    }
+
+    // Skin Hue Indicator: Hue-Abweichung von der Hautton-Linie (55 Grad in CIELAB).
+    // p = Anteil entlang der Linie, d = Abstand senkrecht dazu.
+    if (f_skin)
+    {
+        float p = lab.y * SKIN_COS + lab.z * SKIN_SIN;
+        float d = -lab.y * SKIN_SIN + lab.z * SKIN_COS;
+        float ad = (d < 0.0f) ? -d : d;
+        float t = tan_deg(stol);
+        if (lab.x > 20.0f && p > 0.0f && ad <= t * p && c2 >= 36.0f && c2 <= 4900.0f)
+        {
+            if (ad <= 0.35f * t * p)
+                res = mark_color(base, make_float3(0.0f, 0.90f, 0.20f));   // nahe an der Linie
+            else if (d > 0.0f)
+                res = mark_color(base, make_float3(1.0f, 0.85f, 0.00f));   // Richtung Gelb/Gruen
+            else
+                res = mark_color(base, make_float3(1.0f, 0.25f, 0.45f));   // Richtung Rot/Magenta
+        }
+    }
+
+    // Negatives Indicator: Pixel ausserhalb des Ziel-Gamuts (negative lineare Komponente)
+    if (f_neg)
+    {
+        float3 tg = xyz_to_rgb(xyz, gamut);
+        float m = _fminf(_fminf(tg.x, tg.y), tg.z);
+        if (m < -0.0005f)
+            res = make_float3(1.0f, 0.0f, 1.0f);
+    }
+
+    return res;
+}
+
+// ------------------------------------------- 4c. Legenden (Hide Legends)
+// Glyph-Bitmuster: 15 Bit, Zeile fuer Zeile (5 Zeilen x 3 Spalten), MSB = oben links.
+// 0-9 = Ziffern, 10 = "-", 11 = "+", 12 = ".", 15 = leer
+__DEVICE__ int glyph_bits(int g)
+{
+    if (g == 0) return 0x7B6F;
+    if (g == 1) return 0x2C97;
+    if (g == 2) return 0x73E7;
+    if (g == 3) return 0x73CF;
+    if (g == 4) return 0x5BC9;
+    if (g == 5) return 0x79CF;
+    if (g == 6) return 0x79EF;
+    if (g == 7) return 0x7249;
+    if (g == 8) return 0x7BEF;
+    if (g == 9) return 0x7BCF;
+    if (g == 10) return 0x01C0;
+    if (g == 11) return 0x05D0;
+    if (g == 12) return 0x0002;
+    return 0;
+}
+
+// Text-Treffer: liefert 1, wenn das Pixel (px, py) relativ zur Text-Ecke oben links zu einem
+// gesetzten Glyph-Pixel gehoert. Ein Text hat bis zu 4 Zeichen (je 4 Nibbles, links zuerst);
+// jedes Zeichen ist 3 Pixel breit + 1 Pixel Abstand und 5 Pixel hoch. sc = Pixelgroesse in Bildpixeln.
+__DEVICE__ int text_hit(int code, float px, float py, float sc)
+{
+    if (px < 0.0f || py < 0.0f) return 0;
+    int cx = (int)(px / sc);
+    int cy = (int)(py / sc);
+    if (cy > 4 || cx > 15) return 0;
+    int gi = cx / 4;
+    int gx = cx - gi * 4;
+    if (gx > 2) return 0;
+    int g = (code >> (12 - 4 * gi)) & 15;
+    int bits = glyph_bits(g);
+    int idx = cy * 3 + gx;
+    return (bits >> (14 - idx)) & 1;
+}
+
+// Anzahl belegter Zeichen (Nibble ungleich 15, linksbuendig)
+__DEVICE__ int label_ng(int code)
+{
+    int ng = 0;
+    if (((code >> 12) & 15) != 15) ng = 1; else return 0;
+    if (((code >> 8) & 15) != 15) ng = 2; else return ng;
+    if (((code >> 4) & 15) != 15) ng = 3; else return ng;
+    if ((code & 15) != 15) ng = 4;
+    return ng;
+}
+
+__DEVICE__ float label_w(int code, float sc)
+{
+    return ((float)(label_ng(code) * 4) - 1.0f) * sc + 2.0f * sc;
+}
+
+// Beschriftung mit abgedunkeltem Kasten (Hintergrund x0.3) und weisser Schrift.
+// (bx, by) = Ecke oben links des Kastens in Pixeln, px/py = aktuelles Pixel.
+__DEVICE__ float3 label_px(float3 base, int code, float px, float py, float bx, float by, float sc)
+{
+    if (label_ng(code) == 0)
+        return base;
+    float w = label_w(code, sc);
+    float h = 7.0f * sc;
+    if (px < bx || px >= bx + w || py < by || py >= by + h)
+        return base;
+    if (text_hit(code, px - bx - sc, py - by - sc, sc) != 0)
+        return make_float3(1.0f, 1.0f, 1.0f);
+    return make_float3(base.x * 0.3f, base.y * 0.3f, base.z * 0.3f);
+}
+
+// Code-Erzeuger
+__DEVICE__ int code_2dec(float x)          // "d.dd", Wert 0..9.99
+{
+    int v = (int)(x * 100.0f + 0.5f);
+    if (v < 0) v = 0;
+    if (v > 999) v = 999;
+    return ((v / 100) << 12) | (12 << 8) | (((v / 10) % 10) << 4) | (v % 10);
+}
+__DEVICE__ int code_stop(int s)            // "0", "-3", "+2"
+{
+    if (s == 0) return 0x0FFF;
+    int a = (s < 0) ? -s : s;
+    if (a > 9) a = 9;
+    return (((s < 0) ? 10 : 11) << 12) | (a << 8) | 0x00FF;
+}
+__DEVICE__ int code_int2(int n)            // 1..99
+{
+    if (n < 10) return (n << 12) | 0x0FFF;
+    return ((n / 10) << 12) | ((n % 10) << 8) | 0x00FF;
+}
+
+// Legenden fuer die Input Charts (nur Zahlen; es gibt keine Buchstaben-Schrift):
+//  Mid Gray: kodierter Wert (Codewert in der gewaehlten Transferfunktion)
+//  Gray Ramp: Codewert je Stufe (untere Haelfte)
+//  Exposure Ramp: Stops relativ zu 18 % Grau (obere Haelfte)
+//  Color Chart: Feldnummer 1..24   Skin Chart: L* je Spalte, Chroma-Faktor je Zeile
+//  LUT Cube: Blau-Stufe 0..8 je Slice (B = Stufe / 8)
+__DEVICE__ float3 chart_legend(int sel, float3 c, float u, float v, float cw, float ch, float sc, int n)
+{
+    float px = u * cw;
+    float py = v * ch;
+    float h = 7.0f * sc;
+
+    if (sel == ch_midgray)
+    {
+        int code = code_2dec(c.x);
+        float w = label_w(code, sc);
+        return label_px(c, code, px, py, 0.5f * cw - 0.5f * w, 0.5f * ch - 0.5f * h, sc);
+    }
+    if (sel == ch_grayramp)
+    {
+        if (v < 0.5f) return c;
+        int i = (int)(u * 11.0f); if (i > 10) i = 10;
+        int code = ((i / 10) << 12) | (12 << 8) | ((i % 10) << 4) | 15;
+        float w = label_w(code, sc);
+        float cx = ((float)i + 0.5f) / 11.0f * cw;
+        return label_px(c, code, px, py, cx - 0.5f * w, 0.75f * ch - 0.5f * h, sc);
+    }
+    if (sel == ch_exposure)
+    {
+        if (v >= 0.5f) return c;
+        int count = 2 * n + 1;
+        int i = (int)(u * (float)count); if (i > count - 1) i = count - 1;
+        int code = code_stop(i - n);
+        float w = label_w(code, sc);
+        float cx = ((float)i + 0.5f) / (float)count * cw;
+        return label_px(c, code, px, py, cx - 0.5f * w, 0.25f * ch - 0.5f * h, sc);
+    }
+    if (sel == ch_colorchart)
+    {
+        int col = (int)(u * 6.0f); if (col > 5) col = 5;
+        int row = (int)(v * 4.0f); if (row > 3) row = 3;
+        int code = code_int2(row * 6 + col + 1);
+        return label_px(c, code, px, py, ((float)col + 0.10f) * cw / 6.0f, ((float)row + 0.10f) * ch / 4.0f, sc);
+    }
+    if (sel == ch_skin)
+    {
+        int col = (int)(u * 8.0f); if (col > 7) col = 7;
+        int row = (int)(v * 3.0f); if (row > 2) row = 2;
+        float cwid = cw / 8.0f;
+        float chgt = ch / 3.0f;
+        float3 r = c;
+        if (row == 0)
+            r = label_px(r, code_int2(80 - 8 * col), px, py, ((float)col + 0.08f) * cwid, 0.06f * chgt, sc);
+        if (col == 0)
+        {
+            int cc = (row == 0) ? 0x1C0F : ((row == 1) ? 0x0C6F : 0x1C4F);   // "1.0", "0.6", "1.4"
+            r = label_px(r, cc, px, py, 0.08f * cwid, ((float)row + 0.94f) * chgt - h, sc);
+        }
+        return r;
+    }
+    if (sel == ch_lutcube)
+    {
+        int scol = (int)(u * 3.0f); if (scol > 2) scol = 2;
+        int srow = (int)(v * 3.0f); if (srow > 2) srow = 2;
+        int code = ((srow * 3 + scol) << 12) | 0x0FFF;
+        return label_px(c, code, px, py, ((float)scol + 0.05f) * cw / 3.0f, ((float)srow + 0.05f) * ch / 3.0f, sc);
+    }
+    return c;
+}
+
+// Legende fuer False Color / Saturation False Color: Farbbalken am unteren Bildrand (untere 6 %).
+// Beschriftung = untere Grenze des jeweiligen Bereichs (Stops bzw. C*).
+__DEVICE__ float fc_stop_mid(int i)
+{
+    if (i == 0) return -7.0f;
+    if (i == 1) return -5.0f;
+    if (i == 2) return -3.0f;
+    if (i == 3) return -1.25f;
+    if (i == 4) return 0.0f;
+    if (i == 5) return 1.0f;
+    if (i == 6) return 2.25f;
+    if (i == 7) return 3.5f;
+    return 4.5f;
+}
+__DEVICE__ int fc_label(int i)
+{
+    if (i == 1) return 0xA6FF;   // -6
+    if (i == 2) return 0xA4FF;   // -4
+    if (i == 3) return 0xA2FF;   // -2
+    if (i == 4) return 0xA0C5;   // -0.5
+    if (i == 5) return 0xB0C5;   // +0.5
+    if (i == 6) return 0xB1C5;   // +1.5
+    if (i == 7) return 0xB3FF;   // +3
+    if (i == 8) return 0xB4FF;   // +4
+    return 0xFFFF;
+}
+__DEVICE__ float sat_mid_c2(int i)
+{
+    if (i == 0) return 1.0f;
+    if (i == 1) return 42.25f;
+    if (i == 2) return 306.25f;
+    if (i == 3) return 1225.0f;
+    if (i == 4) return 3306.25f;
+    if (i == 5) return 7225.0f;
+    return 13225.0f;
+}
+__DEVICE__ int sat_label(int i)
+{
+    if (i == 1) return 0x3FFF;   // 3
+    if (i == 2) return 0x10FF;   // 10
+    if (i == 3) return 0x25FF;   // 25
+    if (i == 4) return 0x45FF;   // 45
+    if (i == 5) return 0x70FF;   // 70
+    if (i == 6) return 0x100F;   // 100
+    return 0xFFFF;
+}
+
+// ui = 0..1 ueber die Breite des Bildbereichs, v = 0..1 von oben, W/H = Pixelmasse des Bildbereichs
+__DEVICE__ float3 monitor_legend(float3 img, float ui, float v, float W, float H, float sc, int tf, int f_false, int f_sat)
+{
+    if (!f_false && !f_sat) return img;
+    if (v < 0.94f) return img;
+    int nsw = f_false ? 9 : 7;
+    int i = (int)(ui * (float)nsw); if (i > nsw - 1) i = nsw - 1;
+    float3 c;
+    int code;
+    if (f_false)
+    {
+        c = false_color(0.18f * _exp2f(fc_stop_mid(i)), tf);
+        code = fc_label(i);
+    }
+    else
+    {
+        c = sat_false_color(sat_mid_c2(i), 0.18f, tf);
+        code = sat_label(i);
+    }
+    float px = ui * W;
+    float py = v * H;
+    float sw = W / (float)nsw;
+    float strip_h = 0.06f * H;
+    float by = 0.94f * H + 0.5f * (strip_h - 7.0f * sc);
+    return label_px(c, code, px, py, (float)i * sw + 0.05f * sw, by, sc);
+}
+
+// ------------------------------------------- 5. Chart-Auswahl
+__DEVICE__ float3 render_chart_base(int sel, float u, float v, int prim, int tf, int n, float ev)
+{
+    if (sel == ch_midgray)  return chart_midgray(tf);
+    if (sel == ch_grayramp) return chart_grayramp(u, v);
+    if (sel == ch_exposure) return chart_exposure(u, v, tf, n);
+    if (sel == ch_gradient) return chart_gradient(u, v);
+    if (sel == ch_colorchart) return chart_color(u, v, prim, tf, ev);
+    if (sel == ch_skin)     return chart_skin(u, v, prim, tf, ev);
+    if (sel == ch_lutcube)  return chart_lutcube(u, v, tf);
+    return test_patches(u, prim, tf);
+}
+
+__DEVICE__ float3 render_chart(int sel, float u, float v, int prim, int tf, int n, float ev,
+                               float cw, float ch, float sc, int legends)
+{
+    float3 c = render_chart_base(sel, u, v, prim, tf, n, ev);
+    if (!legends)
+        return c;
+    return chart_legend(sel, c, u, v, cw, ch, sc, n);
+}
+
+// ------------------------------------------- 6. Main Transform
+__DEVICE__ float3 transform(int p_Width, int p_Height, int p_X, int p_Y, float p_R, float p_G, float p_B)
+{
+    float3 rgb = make_float3(p_R, p_G, p_B);
+
+    // Bypass umgeht alles
+    if (bypass)
+        return rgb;
+
+    float W = (float)p_Width;
+    float H = (float)p_Height;
+    float u = ((float)p_X + 0.5f) / W;
+    float v = ((float)p_Y + 0.5f) / H;
+    if (flip_v)
+        v = 1.0f - v;
+
+    // Legenden-Pixelgroesse: ganzzahlig, 4 px bei 1080p und Legend Size 1.0
+    float sc = (float)((int)(H / 270.0f * legend_size));
+    if (sc < 1.0f) sc = 1.0f;
+    int legends = hide_legends ? 0 : 1;
+
+    // Output Monitoring auf dem Bild
+    float3 img = apply_monitoring(rgb, cs_prim, cs_tf, gamut_target,
+                                  mon_false, mon_sat, mon_neg, mon_neutral, mon_skin,
+                                  neutral_tol, skin_tol, mon_dim);
+
+    // Kein Chart: nur Bild (+ Legende der False-Color-Modi)
+    if (chart_sel == ch_off)
+    {
+        if (legends)
+            img = monitor_legend(img, u, v, W, H, sc, cs_tf, mon_false, mon_sat);
+        return img;
+    }
+
+    int n = (int)(exp_stops + 0.5f);
+
+    // Full Frame: nur Chart
+    if (layout_sel == lay_full)
+        return render_chart(chart_sel, u, v, cs_prim, cs_tf, n, chart_ev, W, H, sc, legends);
+
+    // Side Panel: (analysiertes) Bild links, Chart rechts
+    float x0 = 1.0f - panel_w;
+    if (u < x0)
+    {
+        if (legends)
+            img = monitor_legend(img, u / x0, v, x0 * W, H, sc, cs_tf, mon_false, mon_sat);
+        return img;
+    }
+
+    float cu = (u - x0) / panel_w;
+    return render_chart(chart_sel, cu, v, cs_prim, cs_tf, n, chart_ev, panel_w * W, H, sc, legends);
+}
