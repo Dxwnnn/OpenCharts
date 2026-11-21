@@ -5,7 +5,8 @@ A free chart and monitoring tool for DaVinci Resolve, implemented as a single **
 > **Status:** v1.0.0 – tested by the author in DaVinci Resolve 20.2.
 > **Not affiliated** with Blackmagic Design or any commercial chart product.
 
-<!-- Add screenshots here -->
+<img width="521" height="688" alt="image" src="https://github.com/user-attachments/assets/9a7e6559-954a-4327-9f10-d1f79bfa4093" />
+
 
 ---
 
@@ -312,5 +313,5 @@ MIT
 
 ## Credits
 
-- Author: _your name_
+- Author: Johannes Wolf
 - Built for DaVinci Resolve (Blackmagic Design). Color science references: Blackmagic Design's DaVinci Wide Gamut / Intermediate documentation, ITU-R BT.709 / BT.2020, IEC 61966-2-1 (sRGB), CIE 1931 / CIELAB.
