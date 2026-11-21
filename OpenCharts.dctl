@@ -3,8 +3,8 @@
 //               Skin Chart, LUT Cube, Test Patches
 // Output Monitoring: False Color, Saturation False Color, Negatives Indicator,
 //                    Highlight Neutrals, Skin Hue Indicator
-// Color Management: Primaries (Rec.709, DaVinci Wide Gamut, P3-D65, Rec.2020; alle D65)
-//                   und Transferfunktion (Linear, DaVinci Intermediate, Rec.709 OETF, sRGB)
+// Color Management: Primaries (Rec.709, DaVinci Wide Gamut, P3-D65, Rec.2020; all D65)
+//                   and  (Linear, DaVinci Intermediate, Rec.709 OETF, sRGB)
 //
 // ============================================================================
 
@@ -30,7 +30,7 @@ DEFINE_UI_PARAMS(cs_prim, Color Space Primaries, DCTLUI_COMBO_BOX, 1, {prim_rec7
 DEFINE_UI_PARAMS(cs_tf, Transfer Function, DCTLUI_COMBO_BOX, 1, {tf_linear, tf_di, tf_rec709, tf_srgb}, {Linear, DaVinci Intermediate, Rec.709, sRGB})
 DEFINE_UI_PARAMS(bypass, Bypass, DCTLUI_CHECK_BOX, 0)
 
-// ------------------------------------------- 2. Transferfunktionen
+// ------------------------------------------- 2. Transfer Functions
 // DaVinci Intermediate (Blackmagic Design, DaVinci Resolve Wide Gamut Intermediate)
 #define DI_A       0.0075f
 #define DI_B       7.0f
@@ -147,15 +147,15 @@ __DEVICE__ float3 xyz_to_rgb(float3 c, int prim)
     return c;
 }
 
-// Luminanz Y (linear) fuer die gewaehlten Primaries
+// Luminance Y (Linear) for selected primaries
 __DEVICE__ float luminance_Y(float3 lin, int prim)
 {
     return rgb_to_xyz(lin, prim).y;
 }
 
-// Test Patches (5 senkrechte Streifen, Werte in gewaehlten Primaries + Transferfunktion):
-// 1: 18% Grau (linear 0.18)  2: Rec.709 Rot  3: Rec.709 Gruen  4: Rec.709 Blau (je 0.18 linear)
-// 5: Weiss (linear 1.0)
+// Test Patches
+// 1: 18% grey (linear 0.18)  2: Rec.709 red  3: Rec.709 green  4: Rec.709 blue ( 0.18 linear)
+// 5: white (linear 1.0)
 __DEVICE__ float3 test_patches(float u, int prim, int tf)
 {
     float3 lin;
@@ -172,21 +172,21 @@ __DEVICE__ float3 test_patches(float u, int prim, int tf)
     return tf_encode(lin, tf);
 }
 
-// ------------------------------------------- 4. Chart-Generatoren
-// Koordinaten: u = 0..1 (links->rechts), v = 0..1 (oben->unten, mit Flip Vertical umkehrbar)
+// ------------------------------------------- 4. Chart-generator
+// coordinates: u = 0..1 (left->right), v = 0..1 (top->bottom, with Flip Vertical reversible)
 
 __DEVICE__ float3 grey3(float x)
 {
     return make_float3(x, x, x);
 }
 
-// Mid Gray: 18 % linear, mit der gewaehlten Transferfunktion kodiert
+// Mid Gray: 18 % linear, encoded with selected transfer function
 __DEVICE__ float3 chart_midgray(int tf)
 {
     return tf_encode(grey3(0.18f), tf);
 }
 
-// Gray Ramp (Codewerte 0..1): obere Haelfte stufenlos, untere Haelfte 11 Stufen (0.0, 0.1 ... 1.0)
+// Gray Ramp (Codewerte 0..1): top half stopless, bottom half 11 stops (0.0, 0.1 ... 1.0)
 __DEVICE__ float3 chart_grayramp(float u, float v)
 {
     if (v < 0.5f)
@@ -196,8 +196,6 @@ __DEVICE__ float3 chart_grayramp(float u, float v)
     return grey3((float)i / 10.0f);
 }
 
-// Exposure Ramp: Stops relativ zu 18 % Grau (0 Stops = Mitte).
-// Obere Haelfte: ein Feld pro Stop. Untere Haelfte: stufenloser Verlauf ueber denselben Bereich.
 __DEVICE__ float3 chart_exposure(float u, float v, int tf, int n)
 {
     int count = 2 * n + 1;
@@ -216,8 +214,7 @@ __DEVICE__ float3 chart_exposure(float u, float v, int tf, int n)
     return tf_encode(grey3(lin), tf);
 }
 
-// Gradient Chart: 7 waagrechte Baender mit Codewert-Verlaeufen 0..1
-// (Grau, R, G, B, Cyan, Magenta, Gelb) im Arbeitsfarbraum - zeigt Banding und Clipping.
+
 __DEVICE__ float3 chart_gradient(float u, float v)
 {
     int band = (int)(v * 7.0f);
@@ -231,7 +228,6 @@ __DEVICE__ float3 chart_gradient(float u, float v)
     return make_float3(u, u, 0.0f);
 }
 
-// ColorChecker Classic (24 Felder), sRGB-Darstellung (D65) als 8-Bit-Codewerte.
 __DEVICE__ float3 cc_srgb(int idx)
 {
     if (idx == 0) return make_float3(115.0f / 255.0f, 82.0f / 255.0f, 68.0f / 255.0f);
@@ -261,13 +257,11 @@ __DEVICE__ float3 cc_srgb(int idx)
     return make_float3(0.0f, 0.0f, 0.0f);
 }
 
-// Hintergrund zwischen den Feldern: sehr dunkles Grau (linear 0.005)
 __DEVICE__ float3 chart_bg(int tf)
 {
     return tf_encode(grey3(0.005f), tf);
 }
 
-// Linear-Rec.709 -> Arbeits-Primaries, mit Belichtungsfaktor (Stops), dann kodiert
 __DEVICE__ float3 lin709_to_working(float3 lin709, int prim, int tf, float ev)
 {
     float3 w = xyz_to_rgb(rgb_to_xyz(lin709, prim_rec709), prim);
@@ -275,7 +269,7 @@ __DEVICE__ float3 lin709_to_working(float3 lin709, int prim, int tf, float ev)
     return tf_encode(make_float3(w.x * k, w.y * k, w.z * k), tf);
 }
 
-// Color Chart: 6 x 4 Felder (ColorChecker-Anordnung), Gap 6 % je Feld
+
 __DEVICE__ float3 chart_color(float u, float v, int prim, int tf, float ev)
 {
     int col = (int)(u * 6.0f); if (col > 5) col = 5;
@@ -289,8 +283,6 @@ __DEVICE__ float3 chart_color(float u, float v, int prim, int tf, float ev)
     return lin709_to_working(lin709, prim, tf, ev);
 }
 
-// ---- Skin Chart: konstruierte Hautton-Reihe in CIELAB (D65), Hue-Winkel 55 Grad.
-// Achtung: KEINE gemessene Referenz, sondern eine Naeherung entlang der Hautton-Linie.
 #define SKIN_COS 0.573576436f   // cos(55 Grad)
 #define SKIN_SIN 0.819152044f   // sin(55 Grad)
 
@@ -320,7 +312,6 @@ __DEVICE__ float3 lab_to_xyz(float L, float a, float b)
     return make_float3(0.95047f * lab_finv(fx), lab_finv(fy), 1.08883f * lab_finv(fz));
 }
 
-// Skin Chart: 8 Spalten (L* 80 -> 24), 3 Zeilen (Chroma x1.0, x0.6, x1.4)
 __DEVICE__ float3 chart_skin(float u, float v, int prim, int tf, float ev)
 {
     int col = (int)(u * 8.0f); if (col > 7) col = 7;
@@ -338,8 +329,6 @@ __DEVICE__ float3 chart_skin(float u, float v, int prim, int tf, float ev)
     return tf_encode(make_float3(w.x * k, w.y * k, w.z * k), tf);
 }
 
-// ---- LUT Cube: 9x9x9-Gitter als 3x3 Slices (Slice = Blau-Stufe 0..8),
-// je Slice 9x9 Felder: Rot nach rechts, Gruen nach oben. Werte sind Codewerte im Arbeitsfarbraum.
 __DEVICE__ float3 chart_lutcube(float u, float v, int tf)
 {
     int sc = (int)(u * 3.0f); if (sc > 2) sc = 2;
@@ -358,16 +347,12 @@ __DEVICE__ float3 chart_lutcube(float u, float v, int tf)
     return make_float3(r, g, b);
 }
 
-// ------------------------------------------- 4b. Output Monitoring
-// Alle Analysen arbeiten auf der Luminanz Y bzw. CIELAB (D65), berechnet aus den
-// gewaehlten Primaries und der gewaehlten Transferfunktion (decodiert nach linear).
 
 __DEVICE__ float lab_f(float t)
 {
     return (t > 0.008856452f) ? _powf(t, 0.33333334f) : 7.787037f * t + 0.13793103f;
 }
 
-// XYZ (D65) -> CIELAB; Rueckgabe: x = L*, y = a*, z = b*
 __DEVICE__ float3 xyz_to_lab(float3 c)
 {
     float fx = lab_f(c.x / 0.95047f);
@@ -376,7 +361,6 @@ __DEVICE__ float3 xyz_to_lab(float3 c)
     return make_float3(116.0f * fy - 16.0f, 500.0f * (fx - fy), 200.0f * (fy - fz));
 }
 
-// tan() per Reihenentwicklung (Grad -> Verhaeltnis), genau genug fuer 5..40 Grad
 __DEVICE__ float tan_deg(float deg)
 {
     float r = deg * 0.017453293f;
@@ -384,9 +368,7 @@ __DEVICE__ float tan_deg(float deg)
     return r * (1.0f + r2 * (0.33333333f + r2 * (0.13333333f + r2 * 0.053968254f)));
 }
 
-// False Color nach Blenden relativ zu 18 % Grau (Y = 0.18 -> 0 Stops):
-//  < -6 Violett | -6..-4 Blau | -4..-2 Cyan | -2..-0.5 Grau (Original-Luma)
-//  -0.5..+0.5 Gruen (Mittelgrau) | +0.5..+1.5 Pink | +1.5..+3 Gelb | +3..+4 Orange | > +4 Rot
+
 __DEVICE__ float3 false_color(float Y, int tf)
 {
     float stop = _log2f(_fmaxf(Y, 0.000001f) / 0.18f);
@@ -405,8 +387,6 @@ __DEVICE__ float3 false_color(float Y, int tf)
     return make_float3(1.00f, 0.00f, 0.00f);
 }
 
-// Saturation False Color nach CIELAB-Chroma C* (Vergleich mit Quadraten, ohne Wurzel):
-//  < 3 Grau (Original-Luma) | 3..10 Blau | 10..25 Gruen | 25..45 Gelb | 45..70 Orange | 70..100 Rot | > 100 Magenta
 __DEVICE__ float3 sat_false_color(float c2, float Y, int tf)
 {
     if (c2 < 9.0f)
@@ -422,7 +402,6 @@ __DEVICE__ float3 sat_false_color(float c2, float Y, int tf)
     return make_float3(1.00f, 0.00f, 1.00f);
 }
 
-// Mischt Basisbild (40 %) mit einer Markierungsfarbe (60 %)
 __DEVICE__ float3 mark_color(float3 base, float3 mark)
 {
     return make_float3(base.x * 0.4f + mark.x * 0.6f,
@@ -430,9 +409,6 @@ __DEVICE__ float3 mark_color(float3 base, float3 mark)
                        base.z * 0.4f + mark.z * 0.6f);
 }
 
-// Gesamtes Monitoring. f_* = Schalter. Reihenfolge der Markierungen (oben liegt zuletzt):
-// Highlight Neutrals -> Skin Hue -> Negatives.
-// gamut ist ein Index 0..3 in derselben Reihenfolge wie prim_* (Rec.709, DWG, P3-D65, Rec.2020).
 __DEVICE__ float3 apply_monitoring(float3 rgb, int prim, int tf, int gamut,
                                    int f_false, int f_sat, int f_neg, int f_neu, int f_skin,
                                    float ntol, float stol, float dim)
@@ -456,19 +432,15 @@ __DEVICE__ float3 apply_monitoring(float3 rgb, int prim, int tf, int gamut,
     if (!f_neg && !f_neu && !f_skin)
         return base;
 
-    // Hintergrund abdunkeln, damit Markierungen auffallen
     float k = 1.0f - dim;
     float3 res = make_float3(base.x * k, base.y * k, base.z * k);
 
-    // Highlight Neutrals: C* unter Toleranz (Schatten unter ca. -5 Stops ausgenommen)
     if (f_neu)
     {
         if (Y > 0.005f && c2 < ntol * ntol)
             res = mark_color(base, make_float3(0.0f, 0.85f, 0.25f));
     }
 
-    // Skin Hue Indicator: Hue-Abweichung von der Hautton-Linie (55 Grad in CIELAB).
-    // p = Anteil entlang der Linie, d = Abstand senkrecht dazu.
     if (f_skin)
     {
         float p = lab.y * SKIN_COS + lab.z * SKIN_SIN;
@@ -486,7 +458,6 @@ __DEVICE__ float3 apply_monitoring(float3 rgb, int prim, int tf, int gamut,
         }
     }
 
-    // Negatives Indicator: Pixel ausserhalb des Ziel-Gamuts (negative lineare Komponente)
     if (f_neg)
     {
         float3 tg = xyz_to_rgb(xyz, gamut);
@@ -498,9 +469,6 @@ __DEVICE__ float3 apply_monitoring(float3 rgb, int prim, int tf, int gamut,
     return res;
 }
 
-// ------------------------------------------- 4c. Legenden (Hide Legends)
-// Glyph-Bitmuster: 15 Bit, Zeile fuer Zeile (5 Zeilen x 3 Spalten), MSB = oben links.
-// 0-9 = Ziffern, 10 = "-", 11 = "+", 12 = ".", 15 = leer
 __DEVICE__ int glyph_bits(int g)
 {
     if (g == 0) return 0x7B6F;
@@ -519,9 +487,6 @@ __DEVICE__ int glyph_bits(int g)
     return 0;
 }
 
-// Text-Treffer: liefert 1, wenn das Pixel (px, py) relativ zur Text-Ecke oben links zu einem
-// gesetzten Glyph-Pixel gehoert. Ein Text hat bis zu 4 Zeichen (je 4 Nibbles, links zuerst);
-// jedes Zeichen ist 3 Pixel breit + 1 Pixel Abstand und 5 Pixel hoch. sc = Pixelgroesse in Bildpixeln.
 __DEVICE__ int text_hit(int code, float px, float py, float sc)
 {
     if (px < 0.0f || py < 0.0f) return 0;
@@ -537,7 +502,6 @@ __DEVICE__ int text_hit(int code, float px, float py, float sc)
     return (bits >> (14 - idx)) & 1;
 }
 
-// Anzahl belegter Zeichen (Nibble ungleich 15, linksbuendig)
 __DEVICE__ int label_ng(int code)
 {
     int ng = 0;
@@ -553,8 +517,6 @@ __DEVICE__ float label_w(int code, float sc)
     return ((float)(label_ng(code) * 4) - 1.0f) * sc + 2.0f * sc;
 }
 
-// Beschriftung mit abgedunkeltem Kasten (Hintergrund x0.3) und weisser Schrift.
-// (bx, by) = Ecke oben links des Kastens in Pixeln, px/py = aktuelles Pixel.
 __DEVICE__ float3 label_px(float3 base, int code, float px, float py, float bx, float by, float sc)
 {
     if (label_ng(code) == 0)
@@ -568,7 +530,6 @@ __DEVICE__ float3 label_px(float3 base, int code, float px, float py, float bx, 
     return make_float3(base.x * 0.3f, base.y * 0.3f, base.z * 0.3f);
 }
 
-// Code-Erzeuger
 __DEVICE__ int code_2dec(float x)          // "d.dd", Wert 0..9.99
 {
     int v = (int)(x * 100.0f + 0.5f);
@@ -589,12 +550,6 @@ __DEVICE__ int code_int2(int n)            // 1..99
     return ((n / 10) << 12) | ((n % 10) << 8) | 0x00FF;
 }
 
-// Legenden fuer die Input Charts (nur Zahlen; es gibt keine Buchstaben-Schrift):
-//  Mid Gray: kodierter Wert (Codewert in der gewaehlten Transferfunktion)
-//  Gray Ramp: Codewert je Stufe (untere Haelfte)
-//  Exposure Ramp: Stops relativ zu 18 % Grau (obere Haelfte)
-//  Color Chart: Feldnummer 1..24   Skin Chart: L* je Spalte, Chroma-Faktor je Zeile
-//  LUT Cube: Blau-Stufe 0..8 je Slice (B = Stufe / 8)
 __DEVICE__ float3 chart_legend(int sel, float3 c, float u, float v, float cw, float ch, float sc, int n)
 {
     float px = u * cw;
@@ -659,8 +614,6 @@ __DEVICE__ float3 chart_legend(int sel, float3 c, float u, float v, float cw, fl
     return c;
 }
 
-// Legende fuer False Color / Saturation False Color: Farbbalken am unteren Bildrand (untere 6 %).
-// Beschriftung = untere Grenze des jeweiligen Bereichs (Stops bzw. C*).
 __DEVICE__ float fc_stop_mid(int i)
 {
     if (i == 0) return -7.0f;
@@ -706,7 +659,6 @@ __DEVICE__ int sat_label(int i)
     return 0xFFFF;
 }
 
-// ui = 0..1 ueber die Breite des Bildbereichs, v = 0..1 von oben, W/H = Pixelmasse des Bildbereichs
 __DEVICE__ float3 monitor_legend(float3 img, float ui, float v, float W, float H, float sc, int tf, int f_false, int f_sat)
 {
     if (!f_false && !f_sat) return img;
@@ -733,7 +685,6 @@ __DEVICE__ float3 monitor_legend(float3 img, float ui, float v, float W, float H
     return label_px(c, code, px, py, (float)i * sw + 0.05f * sw, by, sc);
 }
 
-// ------------------------------------------- 5. Chart-Auswahl
 __DEVICE__ float3 render_chart_base(int sel, float u, float v, int prim, int tf, int n, float ev)
 {
     if (sel == ch_midgray)  return chart_midgray(tf);
@@ -755,12 +706,10 @@ __DEVICE__ float3 render_chart(int sel, float u, float v, int prim, int tf, int 
     return chart_legend(sel, c, u, v, cw, ch, sc, n);
 }
 
-// ------------------------------------------- 6. Main Transform
 __DEVICE__ float3 transform(int p_Width, int p_Height, int p_X, int p_Y, float p_R, float p_G, float p_B)
 {
     float3 rgb = make_float3(p_R, p_G, p_B);
 
-    // Bypass umgeht alles
     if (bypass)
         return rgb;
 
@@ -771,17 +720,14 @@ __DEVICE__ float3 transform(int p_Width, int p_Height, int p_X, int p_Y, float p
     if (flip_v)
         v = 1.0f - v;
 
-    // Legenden-Pixelgroesse: ganzzahlig, 4 px bei 1080p und Legend Size 1.0
     float sc = (float)((int)(H / 270.0f * legend_size));
     if (sc < 1.0f) sc = 1.0f;
     int legends = hide_legends ? 0 : 1;
 
-    // Output Monitoring auf dem Bild
     float3 img = apply_monitoring(rgb, cs_prim, cs_tf, gamut_target,
                                   mon_false, mon_sat, mon_neg, mon_neutral, mon_skin,
                                   neutral_tol, skin_tol, mon_dim);
 
-    // Kein Chart: nur Bild (+ Legende der False-Color-Modi)
     if (chart_sel == ch_off)
     {
         if (legends)
@@ -791,7 +737,6 @@ __DEVICE__ float3 transform(int p_Width, int p_Height, int p_X, int p_Y, float p
 
     int n = (int)(exp_stops + 0.5f);
 
-    // Full Frame: nur Chart
     if (layout_sel == lay_full)
         return render_chart(chart_sel, u, v, cs_prim, cs_tf, n, chart_ev, W, H, sc, legends);
 
